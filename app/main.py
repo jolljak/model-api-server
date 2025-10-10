@@ -215,3 +215,7 @@ def health_pyannote():
 @app.get("/ping")
 def ping():
     return {"pong": True, "device": str(get_device()), "pipeline": PIPELINE_NAME}
+
+@app.get("/test")
+def test():
+    return 'cicd test success'
