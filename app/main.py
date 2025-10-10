@@ -1,31 +1,62 @@
+# app/main.py
+import os
+from typing import Optional, Any, Dict, Literal
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Literal, Optional
-from .diarization_api import ping
-import os
-import tempfile
+
+from dotenv import load_dotenv
 import torch
-print(torch.version.cuda)    # PyTorch가 빌드된 CUDA 버전
-print(torch.backends.cudnn.version())  # cuDNN 버전
-print(torch.cuda.is_available())       # GPU 인식 여부
-from .utils import ensure_tmp_copy, get_media_duration_sec, is_silent, transcode_to_wav_mono16k
+
+# Whisper 유틸
+from .utils import (
+    ensure_tmp_copy,
+    get_media_duration_sec,
+    is_silent,
+    transcode_to_wav_mono16k,
+    save_upload_to_tmp,  # diarize에서 사용
+)
 from .asr import transcribe_file
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Pyannote 유틸
+from pyannote.audio import Pipeline
+from .diarization_utils import build_speaker_map, to_rttm
 
-app = FastAPI(title="Mina ASR API", version="1.0.0")
+# =========================
+# 공통 환경설정
+# =========================
+load_dotenv()
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-# CORS (Electron에선 크게 문제 없지만 유연하게 허용)
+def get_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# # 디버그: CUDA/ cuDNN 정보 출력 (선택)
+# try:
+#     print("CUDA version (built):", getattr(torch.version, "cuda", None))
+#     print("cuDNN version:", torch.backends.cudnn.version())
+#     print("CUDA available:", torch.cuda.is_available())
+# except Exception as _e:
+#     print("Torch env print error:", _e)
+
+# =========================
+# FastAPI 앱
+# =========================
+app = FastAPI(title="Mina ASR + Diarization API", version="1.0.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 필요 시 특정 origin으로 제한
+    allow_origins=["*"],  # 필요시 제한
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# =========================
+# Whisper (STT) 섹션
+# =========================
 class TranscribeResponse(BaseModel):
     ok: bool
     text: str
@@ -62,7 +93,7 @@ async def transcribe(
         if not ok:
             raise HTTPException(status_code=415, detail=f"ffmpeg 변환 실패: {log[:4000]}")
 
-        # 3) 길이 검사 (녹음 실수/무음 대응)
+        # 3) 길이 검사
         raw_dur = get_media_duration_sec(wav_path)  # 변환된 wav 기준
         if raw_dur is not None and raw_dur <= 0.5:
             raise HTTPException(
@@ -94,21 +125,93 @@ async def transcribe(
 
     finally:
         # 임시파일 정리
+        for p in (tmp_in_path, wav_path):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+# =========================
+# Pyannote (Diarization) 섹션
+# =========================
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise RuntimeError("HF_TOKEN 환경변수가 필요합니다. (Hugging Face token)")
+
+PIPELINE_NAME = "pyannote/speaker-diarization-3.1"
+# print(f"[pyannote] Loading pipeline: {PIPELINE_NAME}")
+_pipeline = Pipeline.from_pretrained(PIPELINE_NAME, use_auth_token=HF_TOKEN)
+_pipeline.to(get_device())
+# print(f"[pyannote] Loaded to device: {get_device()}")
+
+def diarize_core(
+    audio_path: str,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None
+) -> Dict[str, Any]:
+    kwargs = {}
+    if min_speakers is not None:
+        kwargs["min_speakers"] = int(min_speakers)
+    if max_speakers is not None:
+        kwargs["max_speakers"] = int(max_speakers)
+
+    diarization = _pipeline(audio_path, **kwargs)
+
+    raw_labels = [label for _, _, label in diarization.itertracks(yield_label=True)]
+    spk_map = build_speaker_map(raw_labels)
+
+    segments = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        segments.append({
+            "start": round(float(turn.start), 3),
+            "end": round(float(turn.end), 3),
+            "speaker": spk_map[speaker],
+        })
+
+    return {
+        "num_speakers": len(set([s["speaker"] for s in segments])),
+        "segments": segments,
+        "rttm": to_rttm(segments),
+    }
+
+@app.post("/diarize")
+async def diarize_endpoint(
+    file: UploadFile = File(..., description="오디오/영상 파일"),
+    min_speakers: Optional[int] = Form(None),
+    max_speakers: Optional[int] = Form(None),
+):
+    tmp_path = None
+    try:
+        # 업로드 파일 임시 저장
+        tmp_path = save_upload_to_tmp(file)
+        result = diarize_core(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers)
+        return {
+            "ok": True,
+            "device": str(get_device()),   # JSON 직렬화 가능하게 str로
+            "pipeline": PIPELINE_NAME,
+            "result": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"diarization 실패: {e}")
+    finally:
         try:
-            if tmp_in_path and os.path.exists(tmp_in_path):
-                os.remove(tmp_in_path)
-        except Exception:
-            pass
-        try:
-            if wav_path and os.path.exists(wav_path):
-                os.remove(wav_path)
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
         except Exception:
             pass
 
+# =========================
+# 헬스체크
+# =========================
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "msg": "ready"}
 
+@app.get("/health/pyannote")
+def health_pyannote():
+    return {"ok": True, "device": str(get_device()), "pipeline": PIPELINE_NAME}
+
 @app.get("/ping")
-def healthz():
-    return ping()
+def ping():
+    return {"pong": True, "device": str(get_device()), "pipeline": PIPELINE_NAME}
