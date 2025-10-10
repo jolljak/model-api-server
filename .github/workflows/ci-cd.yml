@@ -1,0 +1,62 @@
+name: model api-server CI/CD
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 코드 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v4
+      # 2. Python 설정
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11.2'
+      # 3. 의존성 설치
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      # 4. 테스트 실행
+      - name: Run tests
+        run: |
+          pytest
+      # 6. 배포용 파일 압축
+      - name: Package application files
+        run: zip -r deploy.zip . -x ".git/*" ".github/*" "venv/*"
+      # 7. SCP를 이용해 압축 파일을 서버에 전송
+      - name: Deploy to EC2 via SCP
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          source: "deploy.zip"
+          target: "/home/${{ secrets.EC2_USERNAME }}/"
+      # 8. SSH로 서버에 접속하여 배포 스크립트 실행
+      - name: Execute deployment script on EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          script: |
+            # 배포 디렉토리 생성 및 압축 해제
+            mkdir -p /home/${{ secrets.EC2_USERNAME }}/model-api-server
+            unzip -o /home/${{ secrets.EC2_USERNAME }}/deploy.zip -d /home/${{ secrets.EC2_USERNAME }}/model-api-server
+            cd /home/${{ secrets.EC2_USERNAME }}/model-api-server
+
+            # Python 가상 환경 설정 및 의존성 설치
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install -r requirements.txt
+            
+            # systemd를 통해 애플리케이션 재시작
+            # 이 명령어를 위해 GitHub Actions에서 접속하는 유저는 sudo 권한이 필요할 수 있습니다.
+            sudo systemctl restart model-api-server
+            # 배포 완료 메시지 출력
+            echo "Deployment completed successfully."
