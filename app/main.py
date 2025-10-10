@@ -219,3 +219,4 @@ def ping():
 @app.get("/test")
 def test():
     return 'cicd test success'
+
