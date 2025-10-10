@@ -1,5 +1,7 @@
 # app/main.py
 import os
+import io
+import traceback
 from typing import Optional, Any, Dict, Literal
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -9,54 +11,47 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import torch
 
-# Whisper 유틸
+# Whisper utils (이미 프로젝트에 있는 유틸 사용)
 from .utils import (
     ensure_tmp_copy,
     get_media_duration_sec,
     is_silent,
     transcode_to_wav_mono16k,
-    save_upload_to_tmp,  # diarize에서 사용
 )
 from .asr import transcribe_file
 
-# Pyannote 유틸
+# Pyannote
 from pyannote.audio import Pipeline
 from .diarization_utils import build_speaker_map, to_rttm
 
-# =========================
-# 공통 환경설정
-# =========================
+# ============== 공통 환경설정 ==============
 load_dotenv()
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 def get_device() -> torch.device:
+    # 테스트로 CPU 강제하고 싶으면 환경변수 FORCE_CPU=1로 설정
+    if os.getenv("FORCE_CPU") == "1":
+        return torch.device("cpu")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# # 디버그: CUDA/ cuDNN 정보 출력 (선택)
+# 디버그(원하면 주석):
 # try:
-#     print("CUDA version (built):", getattr(torch.version, "cuda", None))
-#     print("cuDNN version:", torch.backends.cudnn.version())
-#     print("CUDA available:", torch.cuda.is_available())
+#     print("[torch] CUDA (built):", getattr(torch.version, "cuda", None))
+#     print("[torch] cuDNN:", torch.backends.cudnn.version())
+#     print("[torch] CUDA available:", torch.cuda.is_available())
 # except Exception as _e:
-#     print("Torch env print error:", _e)
+#     print("[torch] env print error:", _e)
 
-# =========================
-# FastAPI 앱
-# =========================
+# ============== FastAPI 앱 ==============
 app = FastAPI(title="Mina ASR + Diarization API", version="1.0.0")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 필요시 제한
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# =========================
-# Whisper (STT) 섹션
-# =========================
+# ============== Whisper (STT) ==============
 class TranscribeResponse(BaseModel):
     ok: bool
     text: str
@@ -74,44 +69,29 @@ async def transcribe(
     language: str = Form("auto"),
     task: Literal["transcribe", "translate"] = Form("transcribe"),
 ):
-    """
-    멀티파트 입력을 받아 Whisper로 STT 수행.
-    - language: "auto" | "ko" | "en" …
-    - task: "transcribe"(원문언어 그대로) | "translate"(영어로 번역)
-    """
     tmp_in_path = None
     wav_path = None
-
     try:
-        # 1) 업로드 파일 → 임시 저장
+        # 업로드 읽기 → 임시 저장
         suffix = os.path.splitext(file.filename or "")[1] or ".bin"
         file_bytes = await file.read()
         tmp_in_path = ensure_tmp_copy(None, file_bytes, suffix)
 
-        # 2) Whisper 친화 포맷으로 변환 (mono16k wav)
+        # 변환
         ok, wav_path, log = transcode_to_wav_mono16k(tmp_in_path)
         if not ok:
             raise HTTPException(status_code=415, detail=f"ffmpeg 변환 실패: {log[:4000]}")
 
-        # 3) 길이 검사
-        raw_dur = get_media_duration_sec(wav_path)  # 변환된 wav 기준
+        # 길이/무음 검사
+        raw_dur = get_media_duration_sec(wav_path)
         if raw_dur is not None and raw_dur <= 0.5:
-            raise HTTPException(
-                status_code=400,
-                detail="오디오 길이가 너무 짧습니다(0.5초 이하). 다시 녹음해주세요."
-            )
-
-        # 3-1) 무음 검사
+            raise HTTPException(status_code=400, detail="오디오 길이가 너무 짧습니다(0.5초 이하).")
         if is_silent(wav_path):
-            raise HTTPException(
-                status_code=400,
-                detail="업로드된 오디오가 무음으로 감지되었습니다. 다시 녹음해주세요."
-            )
+            raise HTTPException(status_code=400, detail="업로드된 오디오가 무음으로 감지되었습니다.")
 
-        # 4) STT
+        # STT
         result = transcribe_file(wav_path, language=language, task=task)
 
-        # 5) 응답
         return TranscribeResponse(
             ok=True,
             text=result["text"],
@@ -123,8 +103,14 @@ async def transcribe(
             task=task,
         )
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 어디서 터졌는지 콘솔에 traceback 남기기
+        print("[/transcribe] ERROR:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"transcribe 실패: {e}")
     finally:
-        # 임시파일 정리
         for p in (tmp_in_path, wav_path):
             try:
                 if p and os.path.exists(p):
@@ -132,9 +118,7 @@ async def transcribe(
             except Exception:
                 pass
 
-# =========================
-# Pyannote (Diarization) 섹션
-# =========================
+# ============== Pyannote (Diarization) ==============
 HF_TOKEN = os.getenv("HF_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN 환경변수가 필요합니다. (Hugging Face token)")
@@ -148,7 +132,7 @@ _pipeline.to(get_device())
 def diarize_core(
     audio_path: str,
     min_speakers: Optional[int] = None,
-    max_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None,
 ) -> Dict[str, Any]:
     kwargs = {}
     if min_speakers is not None:
@@ -156,7 +140,8 @@ def diarize_core(
     if max_speakers is not None:
         kwargs["max_speakers"] = int(max_speakers)
 
-    diarization = _pipeline(audio_path, **kwargs)
+    # 핵심: 파이프라인에는 dict로 전달 (torchaudio가 확실히 경로로 인식)
+    diarization = _pipeline({"audio": audio_path}, **kwargs)
 
     raw_labels = [label for _, _, label in diarization.itertracks(yield_label=True)]
     spk_map = build_speaker_map(raw_labels)
@@ -175,6 +160,7 @@ def diarize_core(
         "rttm": to_rttm(segments),
     }
 
+# ==== diarize_endpoint에서 WAV로 변환 후 그 경로를 넘기도록 수정 ====
 @app.post("/diarize")
 async def diarize_endpoint(
     file: UploadFile = File(..., description="오디오/영상 파일"),
@@ -182,28 +168,53 @@ async def diarize_endpoint(
     max_speakers: Optional[int] = Form(None),
 ):
     tmp_path = None
+    wav_path = None
     try:
-        # 업로드 파일 임시 저장
-        tmp_path = save_upload_to_tmp(file)
-        result = diarize_core(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers)
+        # 원본 저장
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="빈 파일입니다.")
+        ext = os.path.splitext(file.filename or "")[1] or ".bin"
+        tmp_path = ensure_tmp_copy(None, content, ext)
+
+        # 반드시 WAV(mono,16k)로 변환
+        ok, wav_path, log = transcode_to_wav_mono16k(tmp_path)
+        if not ok or not wav_path or not os.path.exists(wav_path):
+            raise HTTPException(status_code=415, detail=f"ffmpeg 변환 실패: {str(log)[:4000]}")
+
+        # (선택) 길이/무음 방어
+        dur = get_media_duration_sec(wav_path)
+        if dur is not None and dur <= 0.5:
+            raise HTTPException(status_code=400, detail="오디오 길이가 너무 짧습니다(0.5초 이하).")
+        if is_silent(wav_path):
+            raise HTTPException(status_code=400, detail="업로드된 오디오가 무음으로 감지되었습니다.")
+
+        # 변환한 wav_path를 파이프라인에 전달
+        result = diarize_core(wav_path, min_speakers=min_speakers, max_speakers=max_speakers)
+
         return {
             "ok": True,
-            "device": str(get_device()),   # JSON 직렬화 가능하게 str로
+            "device": str(get_device()),
             "pipeline": PIPELINE_NAME,
             "result": result,
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
+        print("[/diarize] ERROR:", repr(e))
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"diarization 실패: {e}")
     finally:
-        try:
-            if tmp_path and os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
+        for p in (tmp_path, wav_path):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except:
+                pass
 
-# =========================
-# 헬스체크
-# =========================
+# ============== 헬스체크 ==============
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "msg": "ready"}
