@@ -2,7 +2,9 @@
 import os
 import io
 import traceback
-from typing import Optional, Any, Dict, Literal
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, Any, Dict, Literal, List
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -206,6 +208,126 @@ async def diarize_endpoint(
         print("[/diarize] ERROR:", repr(e))
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"diarization 실패: {e}")
+    finally:
+        for p in (tmp_path, wav_path):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except:
+                pass
+
+# ============== STT + Diar 통합 ==============
+def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+def assign_speakers_by_overlap(
+    asr_segments: List[dict],
+    diar_segments: List[dict],
+) -> List[dict]:
+    """
+    ASR 세그먼트(start,end,text)와 DIAR 세그먼트(start,end,speaker)를
+    시간 겹침 최대치 기준으로 매칭하여 speaker를 부여한다.
+    """
+    out = []
+    for seg in asr_segments:
+        a_start = float(seg.get("start", 0.0))
+        a_end = float(seg.get("end", a_start))
+        text = seg.get("text", "")
+
+        best_speaker = None
+        best_ov = 0.0
+        for d in diar_segments:
+            ov = _overlap(a_start, a_end, float(d["start"]), float(d["end"]))
+            if ov > best_ov:
+                best_ov = ov
+                best_speaker = d["speaker"]
+
+        out.append({
+            "start": round(a_start, 3),
+            "end": round(a_end, 3),
+            "speaker": best_speaker or "UNK",
+            "text": text,
+        })
+    return out
+
+@app.post("/transcribe-diarize")
+async def transcribe_diarize_endpoint(
+    file: UploadFile = File(..., description="오디오/영상 파일"),
+    language: str = Form("auto"),
+    task: Literal["transcribe", "translate"] = Form("transcribe"),
+    min_speakers: Optional[int] = Form(None),
+    max_speakers: Optional[int] = Form(None),
+    parallel: bool = Form(True),  # GPU 여유 없으면 False로 보내서 직렬 실행
+):
+    tmp_path = None
+    wav_path = None
+    try:
+        # 1) 업로드 저장
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="빈 파일입니다.")
+        ext = os.path.splitext(file.filename or "")[1] or ".bin"
+        tmp_path = ensure_tmp_copy(None, content, ext)
+
+        # 2) WAV(mono,16k) 한 번만 변환
+        ok, wav_path, log = transcode_to_wav_mono16k(tmp_path)
+        if not ok or not wav_path or not os.path.exists(wav_path):
+            raise HTTPException(status_code=415, detail=f"ffmpeg 변환 실패: {str(log)[:4000]}")
+
+        # 3) 방어로직
+        dur = get_media_duration_sec(wav_path)
+        if dur is not None and dur <= 0.5:
+            raise HTTPException(status_code=400, detail="오디오 길이가 너무 짧습니다(0.5초 이하).")
+        if is_silent(wav_path):
+            raise HTTPException(status_code=400, detail="업로드된 오디오가 무음으로 감지되었습니다.")
+
+        # 4) STT & DIAR 실행
+        loop = asyncio.get_event_loop()
+        executor = ThreadPoolExecutor(max_workers=2)
+
+        def _do_stt():
+            return transcribe_file(wav_path, language=language, task=task)
+
+        def _do_diar():
+            return diarize_core(wav_path, min_speakers=min_speakers, max_speakers=max_speakers)
+
+        if parallel:
+            stt_future = loop.run_in_executor(executor, _do_stt)
+            diar_future = loop.run_in_executor(executor, _do_diar)
+            stt_result, diar_result = await asyncio.gather(stt_future, diar_future)
+        else:
+            stt_result = _do_stt()
+            diar_result = _do_diar()
+
+        # 5) 화자 매핑(세그먼트 겹침)
+        asr_segments = stt_result.get("segments", [])
+        diar_segments = diar_result.get("segments", [])
+        diarized_segments = assign_speakers_by_overlap(asr_segments, diar_segments)
+
+        return {
+            "ok": True,
+            "device": str(get_device()),
+            "pipeline": {
+                "diarization": PIPELINE_NAME,
+                "stt_model": stt_result.get("model_name"),
+            },
+            "duration_sec": stt_result.get("duration"),
+            "language": stt_result.get("language"),
+            "language_probability": stt_result.get("language_probability"),
+            "speakers": {
+                "count": diar_result.get("num_speakers"),
+            },
+            "rttm": diar_result.get("rttm"),
+            "segments": diarized_segments,  # [{start,end,speaker,text}]
+            "text": stt_result.get("text", ""),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("[/transcribe-diarize] ERROR:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"transcribe+diarize 실패: {e}")
     finally:
         for p in (tmp_path, wav_path):
             try:
