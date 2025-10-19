@@ -3,6 +3,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 pydantic==2.9.0
+python-dotenv>=1.0.1
 
 # --- Whisper & Diarization ---
 faster-whisper==1.0.3
@@ -11,3 +12,7 @@ pyannote.audio==3.1.1
 # --- Common Utils ---
 numpy>=1.24
 soundfile==0.12.1
+
+# --- PyTorch (CPU build for simple local setup) ---
+torch==2.4.1
+torchaudio==2.4.1
