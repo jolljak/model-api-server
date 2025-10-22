@@ -1,11 +1,10 @@
-# app/main.py
 import os
 import traceback
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Literal, List, Dict, Any
+from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import torch
@@ -120,34 +119,35 @@ async def transcribe_diarize(
         # 파일 저장
         data = await file.read()
         if not data:
-            raise HTTPException(status_code=400, detail="빈 파일입니다.")
+            return {"resultCode": 0, "message": "빈 파일입니다. 업로드를 다시 확인하세요."}
+
         tmp_path = ensure_tmp_copy(None, data, os.path.splitext(file.filename)[1])
 
         # WAV 변환
         ok, wav_path, log = transcode_to_wav_mono16k(tmp_path)
         if not ok:
-            raise HTTPException(status_code=415, detail="ffmpeg 변환 실패")
+            return {"resultCode": 0, "message": "오디오 변환 실패 (ffmpeg 에러)"}
 
         # 유효성 검사
-        if get_media_duration_sec(wav_path) <= 0.5:
-            raise HTTPException(status_code=400, detail="오디오 너무 짧음")
-        if is_silent(wav_path):
-            raise HTTPException(status_code=400, detail="무음 오디오")
+        duration = get_media_duration_sec(wav_path)
+        if duration <= 0.5:
+            return {"resultCode": 0, "message": "오디오가 너무 짧습니다. (0.5초 미만)"}
 
-        # GPU 기반 실행 (STT + Diarization)
+        if is_silent(wav_path):
+            return {"resultCode": 0, "message": "무음 오디오입니다. 다시 녹음해주세요."}
+
+        # GPU 기반 실행
         device = get_device()
         loop = asyncio.get_event_loop()
 
         if parallel and device.type == "cuda":
-            # GPU 여유 있을 때 병렬 실행
             executor = ThreadPoolExecutor(max_workers=2)
-            stt_future = loop.run_in_executor(executor, lambda: transcribe_file(wav_path, language, task))
+            stt_future = loop.run_in_executor(executor, lambda: transcribe_file(wav_path, language))
             diar_future = loop.run_in_executor(executor, lambda: diarize_core(wav_path, min_speakers, max_speakers))
             stt_result, diar_result = await asyncio.gather(stt_future, diar_future)
         else:
-            # GPU 메모리 아낄 때 순차 실행
             print("[INFO] Running sequentially to reduce GPU contention.")
-            stt_result = transcribe_file(wav_path, language, task)
+            stt_result = transcribe_file(wav_path, language)
             diar_result = diarize_core(wav_path, min_speakers, max_speakers)
 
         # 매핑
@@ -155,7 +155,7 @@ async def transcribe_diarize(
 
         print("분석 완료 (GPU 모드)")
         return {
-            "ok": True,
+            "resultCode": 1,
             "device": str(device),
             "language": stt_result.get("language"),
             "duration": stt_result.get("duration"),
@@ -166,18 +166,18 @@ async def transcribe_diarize(
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"GPU 모드 오류: {e}")
+        return {"resultCode": 0, "message": f"분석 중 오류 발생: {str(e)}"}
 
     finally:
         for p in (tmp_path, wav_path):
             try:
                 if p and os.path.exists(p):
                     os.remove(p)
-            except:
+            except Exception:
                 pass
 
 
 # ============== 간단 헬스체크 ==============
 @app.get("/healthz")
 def health():
-    return {"ok": True, "device": str(get_device()), "cuda_available": torch.cuda.is_available()}
+    return {"resultCode": 1, "device": str(get_device()), "cuda_available": torch.cuda.is_available()}
