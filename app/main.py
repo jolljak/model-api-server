@@ -110,14 +110,12 @@ def assign_speakers(asr_segments: List[dict], diar_segments: List[dict]) -> List
 async def transcribe_diarize(
     file: UploadFile = File(...),
     language: str = Form("auto"),
-    task: Literal["transcribe", "translate"] = Form("transcribe"),
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
     parallel: bool = Form(True),  # 병렬 실행 여부 (GPU 여유 없으면 False로 보냄)
 ):
     tmp_path = wav_path = None
     try:
-        print("🔹 음성파일 분석 시작")
 
         # 파일 저장
         data = await file.read()
