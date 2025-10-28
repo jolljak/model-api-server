@@ -8,6 +8,8 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import torch
+from app.database import get_connection
+import time, uuid
 
 # ====== 유틸 (공통) ======
 from .utils import (
@@ -109,17 +111,50 @@ def assign_speakers(asr_segments: List[dict], diar_segments: List[dict]) -> List
 async def transcribe_diarize(
     file: UploadFile = File(...),
     language: str = Form("auto"),
+    createUserId: str = Form(...),
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
     parallel: bool = Form(True),  # 병렬 실행 여부 (GPU 여유 없으면 False로 보냄)
 ):
     tmp_path = wav_path = None
     try:
-
+        db = get_connection()
         # 파일 저장
         data = await file.read()
         if not data:
             return {"resultCode": 0, "message": "빈 파일입니다. 업로드를 다시 확인하세요."}
+         # 1) 저장 경로 준비: app/uploads/{createUserId}/{YYYYMMDD}/
+        uploads_root = os.path.join(os.path.dirname(__file__), "uploads")
+        datedir = time.strftime("%Y%m%d")
+        user_dir = os.path.join(uploads_root, createUserId, datedir)
+        os.makedirs(user_dir, exist_ok=True)
+
+        # 2) 원본 이름/확장자, 고유 저장 파일명 생성
+        orig_name = os.path.basename(file.filename)
+        _, ext_with_dot = os.path.splitext(orig_name)
+        ext = ext_with_dot.lstrip(".").lower()
+        unique_name = f"{int(time.time())}_{uuid.uuid4().hex}{ext_with_dot}"
+        abs_path = os.path.join(user_dir, unique_name)
+
+        # 3) 디스크에 저장 (방금 읽은 data 사용)
+        with open(abs_path, "wb") as f:
+            f.write(data)
+        file_size = os.path.getsize(abs_path)
+
+        # 4) DB INSERT (상대경로 저장)
+        rel_path = os.path.relpath(abs_path, uploads_root).replace("\\", "/")
+        cur = db.cursor()
+        cur.execute(
+            """
+            INSERT INTO dbo.TB_MINA_FILE_L
+              (filePath, fileSize, fileName, fileExt, createUserId)
+            OUTPUT INSERTED.fileId
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (rel_path, file_size, orig_name, ext, createUserId),
+        )
+        _new_file_id = cur.fetchone()[0]  # 필요하면 사용
+        db.commit()
 
         tmp_path = ensure_tmp_copy(None, data, os.path.splitext(file.filename)[1])
 
