@@ -153,7 +153,7 @@ async def transcribe_diarize(
             """,
             (rel_path, file_size, orig_name, ext, createUserId),
         )
-        _new_file_id = cur.fetchone()[0]  # 필요하면 사용
+        _new_file_id = cur.fetchone()[0]  # fileId 값
         db.commit()
 
         tmp_path = ensure_tmp_copy(None, data, os.path.splitext(file.filename)[1])
@@ -197,6 +197,7 @@ async def transcribe_diarize(
             "speaker_count": diar_result["num_speakers"],
             "segments": combined,
             "full_text": stt_result.get("text"),
+            "fileId": _new_file_id, # 녹음 파일 DB ID 반환
         }
 
     except Exception as e:
