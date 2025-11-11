@@ -1,14 +1,18 @@
 # app/database.py
+import os
 import pyodbc
+from dotenv import load_dotenv
 
-server = '43.200.45.240,1433'
-database = 'mina'
-username = 'sa'
-password = 'mina123!'
-driver = '{ODBC Driver 17 for SQL Server}'  # 중괄호 포함된 상태
+load_dotenv()  # .env 파일 불러오기
+
+server = os.getenv("DB_SERVER")
+database = os.getenv("DB_NAME")
+username = os.getenv("DB_USER")
+password = os.getenv("DB_PASSWORD")
+driver = "{ODBC Driver 17 for SQL Server}"
 
 connection_string = (
-    f"DRIVER={driver};"        # ← 여긴 중괄호 중복 X
+    f"DRIVER={driver};"
     f"SERVER={server};"
     f"DATABASE={database};"
     f"UID={username};"
