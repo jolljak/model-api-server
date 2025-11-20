@@ -1,9 +1,8 @@
-# app/database.py
 import os
 import pyodbc
 from dotenv import load_dotenv
 
-load_dotenv()  # .env 파일 불러오기
+load_dotenv()
 
 server = os.getenv("DB_SERVER")
 database = os.getenv("DB_NAME")
@@ -21,10 +20,4 @@ connection_string = (
 )
 
 def get_connection():
-    try:
-        conn = pyodbc.connect(connection_string)
-        print("데이터베이스 연결 성공")
-        return conn
-    except Exception as e:
-        print("데이터베이스 연결 실패:", e)
-        raise
+    return pyodbc.connect(connection_string)
