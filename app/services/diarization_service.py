@@ -21,7 +21,7 @@ def diarize_core(path: str, min_speakers=None, max_speakers=None):
             "start": float(turn.start),
             "end": float(turn.end),
             "speaker": spk_map[spk]
-        })
+        })  
 
     return {
         "num_speakers": len(set(s["speaker"] for s in segments)),
