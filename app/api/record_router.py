@@ -19,8 +19,11 @@ from app.utils.audio_utils import (
 )
 from app.utils.merge_utils import assign_speakers, segments_to_text
 from app.core.device import get_device
+from app.services.processor import MeetingProcessor
+
 
 router = APIRouter()
+processor = MeetingProcessor()
 
 @router.post("/transcribe-diarize")
 async def transcribe_diarize(
@@ -45,7 +48,7 @@ async def transcribe_diarize(
 
         # 2. 파일 저장 (Storage Service 활용)
         # DB 저장이 포함되어 있다면 file_info에 fileId가 있을 것입니다.
-        file_info = save_uploaded_file(data, file.filename, createUserId)
+        # file_info = save_uploaded_file(data, file.filename, createUserId)
         # file_info가 딕셔너리가 아닌 경우(DB 미연결 등) 예외처리 필요할 수 있음
         
         # 3. 오디오 전처리 (wav 16k 변환)
@@ -61,8 +64,8 @@ async def transcribe_diarize(
         if not duration or duration <= 0.5:
             return {"resultCode": 0, "message": "오디오가 너무 짧습니다."}
         
-        # if is_silent(wav_path):
-        #     return {"resultCode": 0, "message": "무음 파일입니다."}
+        if is_silent(wav_path):
+            return {"resultCode": 0, "message": "무음 파일입니다."}
 
         # 5. 분석 수행 (병렬 처리)
         device = get_device()
@@ -93,10 +96,12 @@ async def transcribe_diarize(
         combined = assign_speakers(stt_res["segments"], diar_res["segments"])
         formatted_text = "\n".join([f"{s['speaker']}: {s['text']}" for s in combined])
         full_text = stt_res.get("text", "")
+        summary = await processor.analyze_transcript(formatted_text)
+        print("모델 요약 결과 확인", summary)
 
         return {
             "resultCode": 1,
-            "fileId": file_info.get("fileId", 0) if isinstance(file_info, dict) else 0,
+            # "fileId": file_info.get("fileId", 0) if isinstance(file_info, dict) else 0,
             "duration": stt_res.get("duration"),
             "speaker_count": diar_res.get("num_speakers"),
             "segments": combined,

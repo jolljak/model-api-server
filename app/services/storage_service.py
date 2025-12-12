@@ -27,26 +27,26 @@ def save_uploaded_file(data: bytes, original_name: str, user_id: str):
     file_size = os.path.getsize(abs_path)
 
     # DB 저장
-    # rel_path = os.path.relpath(abs_path, UPLOAD_ROOT).replace("\\", "/")
-    # conn = get_connection()
-    # cur = conn.cursor()
+    rel_path = os.path.relpath(abs_path, UPLOAD_ROOT).replace("\\", "/")
+    conn = get_connection()
+    cur = conn.cursor()
 
-    # cur.execute(
-    #     """
-    #     INSERT INTO dbo.TB_MINA_FILE_L
-    #       (filePath, fileSize, fileName, fileExt, createUserId)
-    #     OUTPUT INSERTED.fileId
-    #     VALUES (?, ?, ?, ?, ?)
-    #     """,
-    #     (rel_path, file_size, original_name, ext.lstrip("."), user_id),
-    # )
-    # file_id = cur.fetchone()[0]
-    # conn.commit()
-    # conn.close()
+    cur.execute(
+        """
+        INSERT INTO dbo.TB_MINA_FILE_L
+          (filePath, fileSize, fileName, fileExt, createUserId)
+        OUTPUT INSERTED.fileId
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (rel_path, file_size, original_name, ext.lstrip("."), user_id),
+    )
+    file_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
 
     return {
-        # "file_id": file_id,
+        "file_id": file_id,
         "abs_path": abs_path,
-        # "rel_path": rel_path,
+        "rel_path": rel_path,
         "file_size": file_size,
     }
