@@ -48,7 +48,7 @@ async def transcribe_diarize(
 
         # 2. 파일 저장 (Storage Service 활용)
         # DB 저장이 포함되어 있다면 file_info에 fileId가 있을 것입니다.
-        # file_info = save_uploaded_file(data, file.filename, createUserId)
+        file_info = save_uploaded_file(data, file.filename, createUserId)
         # file_info가 딕셔너리가 아닌 경우(DB 미연결 등) 예외처리 필요할 수 있음
         
         # 3. 오디오 전처리 (wav 16k 변환)
@@ -96,17 +96,36 @@ async def transcribe_diarize(
         combined = assign_speakers(stt_res["segments"], diar_res["segments"])
         formatted_text = "\n".join([f"{s['speaker']}: {s['text']}" for s in combined])
         full_text = stt_res.get("text", "")
-        summary = await processor.analyze_transcript(formatted_text)
-        print("모델 요약 결과 확인", summary)
+        analysis = await processor.analyze_transcript(formatted_text)
+        summary_text = analysis.summary
+        tasks_payload = [
+            {
+                "speaker": st.speaker,
+                "items": [
+                    {
+                        "업무설명": it.업무설명,
+                        "priority": it.priority
+                    }
+                    for it in st.items
+                ]
+            }
+            for st in analysis.tasks
+        ]
+
+
+        print("모델 요약 결과 확인", summary_text)
+        print("모델 할 일 결과 확인", tasks_payload)
 
         return {
             "resultCode": 1,
-            # "fileId": file_info.get("fileId", 0) if isinstance(file_info, dict) else 0,
+            "fileId": file_info.get("fileId", 0) if isinstance(file_info, dict) else 0,
             "duration": stt_res.get("duration"),
             "speaker_count": diar_res.get("num_speakers"),
             "segments": combined,
             "full_text": full_text,
-            "formatted_text": formatted_text
+            "formatted_text": formatted_text,
+            "summary": summary_text,
+            "tasks": tasks_payload
         }
 
     except Exception as e:

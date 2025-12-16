@@ -15,12 +15,13 @@ except ImportError:
 
 # 내부 모듈
 from app.schemas.mcp import MeetingAnalysisResult, ActionItem, ServiceDefinition
+from app.schemas.meeting_analysis import get_meeting_analysis_parser
 from app.services.tool_manager import DynamicToolManager
 from app.models.llm_model import get_llm_model # [중요] 싱글톤 LLM 로더
 
 class MeetingProcessor:
     def __init__(self):
-        self.parser = PydanticOutputParser(pydantic_object=MeetingAnalysisResult)
+        self.parser = get_meeting_analysis_parser()
         self.service_parser = PydanticOutputParser(pydantic_object=ServiceDefinition)
 
     async def analyze_transcript(self, transcript: str) -> MeetingAnalysisResult:
@@ -29,7 +30,18 @@ class MeetingProcessor:
         if not llm: raise ValueError("LLM not loaded")
         
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "Analyze the transcript. Output valid JSON.\n{format_instructions}"),
+            ("system",
+            "너는 회의 텍스트를 분석하는 도우미야.\n"
+            "반드시 아래 스키마에 맞는 JSON만 출력해.\n"
+            "{format_instructions}\n"
+            "규칙:\n"
+            "- 입력은 화자(S0, S1, ...)별 발언이 섞여 있는 회의 로그다.\n"
+            "- summary는 화자 구분 없이 회의 전체를 하나의 문단으로 요약한다.\n"
+            "- 회의와 무관한 잡담은 요약에서 최소화하거나 제외한다.\n"
+            "- tasks는 화자별로 실제 실행 가능한 업무만 추출한다.\n"
+            "- 업무가 없는 화자는 items를 빈 배열로 둔다.\n"
+            "- priority는 높음/중간/낮음 중 하나만 사용한다.\n"
+            ),
             ("human", "{transcript}")
         ])
         
