@@ -104,7 +104,8 @@ async def transcribe_diarize(
                 "items": [
                     {
                         "업무설명": it.업무설명,
-                        "priority": it.priority
+                        "priority": it.priority,
+                        "due_date": it.due_date
                     }
                     for it in st.items
                 ]

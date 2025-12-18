@@ -8,7 +8,7 @@ server = os.getenv("DB_SERVER")
 database = os.getenv("DB_NAME")
 username = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
-driver = "{ODBC Driver 17 for SQL Server}"
+driver = os.getenv("DB_DRIVER", "{SQL Server}")
 
 connection_string = (
     f"DRIVER={driver};"

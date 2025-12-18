@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Header
+import httpx
 from typing import List, Dict, Any
 
 from app.schemas.mcp import (
@@ -45,8 +46,8 @@ async def list_services():
     sanitized = []
     for svc in services:
         d = svc.dict()
-        if d["runtimeAuthKey"] and len(d["runtimeAuthKey"]) > 5:
-            d["runtimeAuthKey"] = d["runtimeAuthKey"][:5] + "***"
+        if d["token"] and len(d["token"]) > 5:
+            d["token"] = d["token"][:5] + "***"
         sanitized.append(d)
     return {"status": "success", "count": len(sanitized), "services": sanitized}
 
@@ -65,11 +66,26 @@ async def analyze_meeting(payload: AnalyzeRequest):
 async def execute_actions(payload: ExecuteRequest):
     """
     추출된 할 일(Action Item)을 실제 연결된 도구(Jira, GitHub 등)로 실행합니다.
+    serviceType과 config가 포함된 경우 자동으로 도구를 선등록(Warm-up)하고 실행합니다.
     """
     if not payload.items: 
         return {"status": "skipped", "message": "No items to execute"}
     
-    logs = await processor.execute_actions(payload.items, tool_manager)
+    # [NEW] 실행 요청 시 서비스 정보가 포함되어 있으면 자동 등록 수행
+    service_def = None
+    if payload.serviceType and payload.config:
+        try:
+            from app.schemas.mcp import ServicePresetRequest
+            preset_payload = ServicePresetRequest(
+                serviceType=payload.serviceType,
+                config=payload.config
+            )
+            service_def = await tool_manager.register_preset(preset_payload)
+            print(f"[INFO] 🔄 Auto-registered service '{payload.serviceType}' from execute-actions payload.")
+        except Exception as e:
+            print(f"[ERROR] ❌ Failed to auto-register service: {str(e)}")
+
+    logs = await processor.execute_actions(payload.items, tool_manager, payload.context, service_def)
     return {"status": "completed", "logs": logs}
 
 @router.post("/services/register-preset")
@@ -80,5 +96,44 @@ async def register_preset(payload: ServicePresetRequest):
     try:
         service = await tool_manager.register_preset(payload)
         return {"status": "success", "service": service.dict()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.get("/services/google-calendar/events")
+async def get_google_calendar_events(authorization: str = Header(None)):
+    """
+    구글 캘린더의 최근 일정 5개를 조회합니다.
+    Authorization 헤더에 'Bearer {access_token}' 형식이 필요합니다.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    
+    token = authorization.split(" ")[1]
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    params = {
+        "maxResults": 5,
+        "orderBy": "startTime",
+        "singleEvents": True,
+        "timeMin": "2024-01-01T00:00:00Z" # 실제로는 현재 시간 기준으로 필터링 가능
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return {"status": "error", "code": resp.status_code, "message": resp.text}
+            
+            data = resp.json()
+            events = []
+            for item in data.get("items", []):
+                events.append({
+                    "id": item.get("id"),
+                    "summary": item.get("summary"),
+                    "start": item.get("start", {}).get("dateTime") or item.get("start", {}).get("date"),
+                    "end": item.get("end", {}).get("dateTime") or item.get("end", {}).get("date"),
+                    "location": item.get("location")
+                })
+            return {"status": "success", "events": events}
     except Exception as e:
         return {"status": "error", "message": str(e)}

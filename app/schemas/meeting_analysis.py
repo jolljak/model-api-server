@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 try:
@@ -11,6 +11,7 @@ Priority = Literal["높음", "중간", "낮음"]
 class TaskItem(BaseModel):
     업무설명: str = Field(..., description="실행 가능한 업무 한 줄")
     priority: Priority = Field(..., description="높음|중간|낮음")
+    due_date: Optional[str] = Field(None, description="마감일 (YYYY-MM-DD) 또는 null")
 
 class SpeakerTasks(BaseModel):
     speaker: str = Field(..., description='예: "S0", "S1"')

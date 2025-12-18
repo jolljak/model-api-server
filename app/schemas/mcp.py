@@ -13,7 +13,7 @@ class ServiceDefinition(BaseModel):
     payloadTemplate: str
     headerTemplate: Optional[str] = "{}"
     createUserId: str = "admin"
-    runtimeAuthKey: Optional[str] = None 
+    token: Optional[str] = None 
     
     # [NEW] AI가 알려주는 인증 가이드 (프론트엔드 연동용)
     authGuideUrl: Optional[str] = None
@@ -24,6 +24,7 @@ class ActionItem(BaseModel):
     description: str
     assignee: Optional[str] = None
     priority: str = "Medium"
+    due_date: Optional[str] = None
     is_automatable: bool
 
 # 3. 회의 분석 전체 결과
@@ -38,6 +39,9 @@ class AnalyzeRequest(BaseModel):
 
 class ExecuteRequest(BaseModel):
     items: List[ActionItem]
+    serviceType: Optional[str] = None  # Optional: "github", "notion", etc.
+    config: Optional[dict] = None      # Optional: { "token": "...", ... }
+    context: Optional[dict] = None     # Optional: { "projectName": "...", "userName": "..." }
 
 class ServiceGuideRequest(BaseModel):
     request: str
